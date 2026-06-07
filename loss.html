@@ -69,7 +69,10 @@
   .stat { font-size: 1.05rem; font-weight: 600; color: #222; }
   .stat span { color: #d97706; }
 
-  canvas { border-radius: 6px; background: white; display: block; flex-shrink: 0; }
+  .plot-container { flex-shrink: 0; }
+  .plot-container svg { display: block; border-radius: 6px; background: white; }
+
+  .tick text { font-family: system-ui, sans-serif; }
 </style>
 </head>
 <body>
@@ -97,7 +100,7 @@
       </div>
       <div class="stat">MSE = <span id="lin-mse">—</span></div>
     </div>
-    <canvas id="canvas-lin" width="640" height="400"></canvas>
+    <div class="plot-container" id="svg-lin"></div>
   </div>
 
   <!-- Loss Landscape -->
@@ -108,229 +111,317 @@
         <div class="slider-label">weight <span id="loss-w-val">0.00</span></div>
         <input type="range" id="loss-w" min="-2" max="2" step="0.01" value="0">
       </div>
+      <div class="slider-group">
+        <div class="slider-label">bias <span id="loss-b-val">0.00</span></div>
+        <input type="range" id="loss-b" min="-2" max="2" step="0.01" value="0">
+      </div>
     </div>
-    <canvas id="canvas-loss-fit"  width="360" height="380"></canvas>
-    <canvas id="canvas-loss-loss" width="240" height="380"></canvas>
+    <div class="plot-container" id="svg-loss-fit"></div>
+    <div class="plot-container" id="svg-loss-loss"></div>
   </div>
 
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
 <script>
 // ── Data ──────────────────────────────────────────────────────────────────────
 const linX = [];
 for (let xi = 0; xi < 13.1; xi = Math.round((xi + 0.2) * 10) / 10) linX.push(xi);
 const linY = linX.map(xi => Math.sin(xi) + xi / 4);
 
-// ── Canvas DPR setup ──────────────────────────────────────────────────────────
-function setupCanvas(canvas) {
-  const dpr = window.devicePixelRatio || 1;
-  const cssW = canvas.width, cssH = canvas.height;
-  canvas.width  = cssW * dpr;
-  canvas.height = cssH * dpr;
-  canvas.style.width  = cssW + 'px';
-  canvas.style.height = cssH + 'px';
-  canvas.getContext('2d').scale(dpr, dpr);
+// ── MSE helper ────────────────────────────────────────────────────────────────
+function computeMSE(w, b) {
+  return linX.reduce((sum, xi, i) => sum + (linY[i] - w * xi - b) ** 2, 0);
 }
 
-// ── Plot margins and helpers ──────────────────────────────────────────────────
+// ── Shared margins ────────────────────────────────────────────────────────────
 const M = { top: 36, right: 24, bottom: 52, left: 64 };
 
-function makeHelpers(cssW, cssH, xMin, xMax, yMin, yMax) {
-  const pW = cssW - M.left - M.right;
-  const pH = cssH - M.top  - M.bottom;
-  const toC = (x, y) => [
-    M.left + (x - xMin) / (xMax - xMin) * pW,
-    M.top  + pH - (y - yMin) / (yMax - yMin) * pH,
-  ];
-  return { pW, pH, toC };
-}
+// ── Build a linear-fit SVG (reused for both the main tab and loss-fit panel) ──
+function buildLinearFitSVG(containerId, W, H, title) {
+  const pW = W - M.left - M.right;
+  const pH = H - M.top  - M.bottom;
+  const xMin = 0, xMax = 13, yMin = -1, yMax = 4.7;
 
-// ── Shared axes drawing ───────────────────────────────────────────────────────
-// yTickFmt: optional function (value) => label string
-function drawAxes(ctx, cssW, cssH, xMin, xMax, yMin, yMax, xTicks, yTicks, xLabel, yLabel, title, yTickFmt) {
-  const { pW, pH, toC } = makeHelpers(cssW, cssH, xMin, xMax, yMin, yMax);
-  const fmtY = yTickFmt || (v => v);
+  const xs = d3.scaleLinear([xMin, xMax], [M.left, M.left + pW]);
+  const ys = d3.scaleLinear([yMin, yMax], [M.top + pH, M.top]);
 
-  // Light grid
-  ctx.strokeStyle = '#ececec'; ctx.lineWidth = 1;
-  for (const ty of yTicks) {
-    const [, cy] = toC(0, ty);
-    ctx.beginPath(); ctx.moveTo(M.left, cy); ctx.lineTo(M.left + pW, cy); ctx.stroke();
-  }
-  for (const tx of xTicks) {
-    const [cx] = toC(tx, 0);
-    ctx.beginPath(); ctx.moveTo(cx, M.top); ctx.lineTo(cx, M.top + pH); ctx.stroke();
-  }
+  const svg = d3.select('#' + containerId)
+    .append('svg').attr('width', W).attr('height', H);
+
+  // Clip path for prediction line
+  svg.append('defs').append('clipPath')
+    .attr('id', containerId + '-clip')
+    .append('rect')
+    .attr('x', M.left).attr('y', M.top)
+    .attr('width', pW).attr('height', pH);
+
+  // Grid lines
+  [-1,0,1,2,3,4].forEach(ty => {
+    svg.append('line')
+      .attr('x1', M.left).attr('x2', M.left + pW)
+      .attr('y1', ys(ty)).attr('y2', ys(ty))
+      .attr('stroke', '#ececec').attr('stroke-width', 1);
+  });
+  [0,2,4,6,8,10,12].forEach(tx => {
+    svg.append('line')
+      .attr('x1', xs(tx)).attr('x2', xs(tx))
+      .attr('y1', M.top).attr('y2', M.top + pH)
+      .attr('stroke', '#ececec').attr('stroke-width', 1);
+  });
 
   // Axes
-  const [axL, axB] = toC(xMin, yMin), [axR] = toC(xMax, yMin), [, axT] = toC(xMin, yMax);
-  ctx.strokeStyle = '#333'; ctx.lineWidth = 1.5;
-  ctx.beginPath(); ctx.moveTo(axL, axB); ctx.lineTo(axR, axB); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(axL, axB); ctx.lineTo(axL, axT); ctx.stroke();
+  svg.append('g')
+    .attr('transform', `translate(0,${M.top + pH})`)
+    .call(d3.axisBottom(xs).tickValues([0,2,4,6,8,10,12]).tickSizeOuter(0))
+    .call(g => g.select('.domain').attr('stroke', '#333'))
+    .call(g => g.selectAll('text').style('font', '12px system-ui').attr('fill', '#444'));
 
-  // X ticks + labels
-  ctx.fillStyle = '#444'; ctx.font = '12px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-  for (const tx of xTicks) {
-    const [cx, cy] = toC(tx, yMin);
-    ctx.beginPath(); ctx.strokeStyle = '#333'; ctx.lineWidth = 1.5;
-    ctx.moveTo(cx, cy); ctx.lineTo(cx, cy + 4); ctx.stroke();
-    ctx.fillText(tx, cx, cy + 6);
-  }
-
-  // Y ticks + labels
-  ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
-  for (const ty of yTicks) {
-    const [cx, cy] = toC(xMin, ty);
-    ctx.beginPath(); ctx.strokeStyle = '#333'; ctx.lineWidth = 1.5;
-    ctx.moveTo(cx, cy); ctx.lineTo(cx - 4, cy); ctx.stroke();
-    ctx.fillText(fmtY(ty), cx - 7, cy);
-  }
+  svg.append('g')
+    .attr('transform', `translate(${M.left},0)`)
+    .call(d3.axisLeft(ys).tickValues([-1,0,1,2,3,4]).tickSizeOuter(0))
+    .call(g => g.select('.domain').attr('stroke', '#333'))
+    .call(g => g.selectAll('text').style('font', '12px system-ui').attr('fill', '#444'));
 
   // Axis labels
-  ctx.fillStyle = '#444'; ctx.font = 'italic 14px Georgia, serif';
-  ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
-  ctx.fillText(xLabel, M.left + pW / 2, cssH - 6);
+  svg.append('text')
+    .attr('x', xs(6.5)).attr('y', H - 6)
+    .attr('text-anchor', 'middle')
+    .style('font', 'italic 14px Georgia, serif').attr('fill', '#444').text('x');
 
-  ctx.save();
-  const [, midY] = toC(xMin, (yMin + yMax) / 2);
-  ctx.translate(16, midY);
-  ctx.rotate(-Math.PI / 2);
-  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillText(yLabel, 0, 0);
-  ctx.restore();
+  svg.append('text')
+    .attr('transform', `translate(16,${ys(1.85)}) rotate(-90)`)
+    .attr('text-anchor', 'middle')
+    .style('font', 'italic 14px Georgia, serif').attr('fill', '#444').text('y');
 
   // Title
-  ctx.font = 'bold 14px system-ui'; ctx.fillStyle = '#222';
-  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-  ctx.fillText(title, M.left + pW / 2, 8);
+  svg.append('text')
+    .attr('x', M.left + pW / 2).attr('y', 8)
+    .attr('text-anchor', 'middle').attr('dominant-baseline', 'hanging')
+    .style('font', 'bold 14px system-ui, sans-serif').attr('fill', '#222')
+    .text(title);
+
+  // Prediction line (dashed red, clipped)
+  const predLine = svg.append('g')
+    .attr('clip-path', 'url(#' + containerId + '-clip)')
+    .append('line')
+    .attr('stroke', '#dc2626').attr('stroke-width', 2)
+    .style('stroke-dasharray', '6,4');
+
+  // Data scatter (static)
+  linX.forEach((xi, i) => {
+    svg.append('circle')
+      .attr('cx', xs(xi)).attr('cy', ys(linY[i])).attr('r', 4)
+      .attr('fill', '#2563eb').attr('stroke', '#1d4ed8').attr('stroke-width', 1.2);
+  });
+
+  // Legend (top-right box)
+  const legX = M.left + pW - 178, legY = M.top + 8;
+  svg.append('rect')
+    .attr('x', legX - 6).attr('y', legY - 5)
+    .attr('width', 174).attr('height', 46)
+    .attr('fill', 'rgba(255,255,255,0.9)').attr('stroke', '#ddd').attr('stroke-width', 1)
+    .attr('rx', 3);
+
+  svg.append('circle')
+    .attr('cx', legX + 6).attr('cy', legY + 9).attr('r', 5)
+    .attr('fill', '#2563eb').attr('stroke', '#1d4ed8').attr('stroke-width', 1.2);
+  svg.append('text')
+    .attr('x', legX + 16).attr('y', legY + 9)
+    .attr('dominant-baseline', 'middle')
+    .style('font', '12px system-ui').attr('fill', '#333').text('Sine function');
+
+  svg.append('line')
+    .attr('x1', legX).attr('x2', legX + 18)
+    .attr('y1', legY + 28).attr('y2', legY + 28)
+    .attr('stroke', '#dc2626').attr('stroke-width', 2)
+    .style('stroke-dasharray', '5,3');
+
+  const legendLabel = svg.append('text')
+    .attr('x', legX + 22).attr('y', legY + 28)
+    .attr('dominant-baseline', 'middle')
+    .style('font', '12px system-ui').attr('fill', '#333');
+
+  return { predLine, legendLabel, xs, ys, xMin, xMax };
 }
 
-// ── Linear / scatter-line plot ────────────────────────────────────────────────
-function drawLinearPlot(canvas, xData, yData, wVal, bVal, lineLabel, title) {
-  const cssW = parseInt(canvas.style.width);
-  const cssH = parseInt(canvas.style.height);
-  const ctx  = canvas.getContext('2d');
-  const xMin = 0, xMax = 13, yMin = -1, yMax = 4.7;
-  const { pW, pH, toC } = makeHelpers(cssW, cssH, xMin, xMax, yMin, yMax);
-  const xTicks = [0, 2, 4, 6, 8, 10, 12];
-  const yTicks = [-1, 0, 1, 2, 3, 4];
+// ── Update prediction line ────────────────────────────────────────────────────
+function updatePredLine({ predLine, legendLabel, xs, ys, xMin, xMax }, w, b, labelStr) {
+  predLine
+    .attr('x1', xs(xMin)).attr('y1', ys(w * xMin + b))
+    .attr('x2', xs(xMax)).attr('y2', ys(w * xMax + b));
+  legendLabel.text(labelStr);
+}
 
-  ctx.clearRect(0, 0, cssW, cssH);
-  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cssW, cssH);
+// ── Build loss landscape SVG (2D contour heatmap) ────────────────────────────
+function buildLossLandscapeSVG(containerId) {
+  const W = 240, H = 380;
+  const pW = W - M.left - M.right;
+  const pH = H - M.top  - M.bottom;
+  const wMin = -2, wMax = 2, bMin = -2, bMax = 2;
+  const LN = 150;
+  const MSE_CAP = 15000;
 
-  drawAxes(ctx, cssW, cssH, xMin, xMax, yMin, yMax, xTicks, yTicks, 'x', 'y', title);
+  const ws = d3.scaleLinear([wMin, wMax], [M.left, M.left + pW]);
+  const bs = d3.scaleLinear([bMin, bMax], [M.top + pH, M.top]); // inverted
 
-  // Prediction line (dashed red), clipped to plot area
-  const [axL, axB] = toC(xMin, yMin), [, axT] = toC(xMin, yMax), [axR] = toC(xMax, yMin);
-  ctx.save();
-  ctx.beginPath(); ctx.rect(M.left, M.top, pW, pH); ctx.clip();
-  ctx.strokeStyle = '#dc2626'; ctx.lineWidth = 2; ctx.setLineDash([6, 4]);
-  ctx.beginPath();
-  ctx.moveTo(...toC(xMin, wVal * xMin + bVal));
-  ctx.lineTo(...toC(xMax, wVal * xMax + bVal));
-  ctx.stroke();
-  ctx.setLineDash([]);
-  ctx.restore();
+  const svg = d3.select('#' + containerId)
+    .append('svg').attr('width', W).attr('height', H);
 
-  // Data scatter
-  ctx.fillStyle = '#2563eb'; ctx.strokeStyle = '#1d4ed8'; ctx.lineWidth = 1.2;
-  for (let i = 0; i < xData.length; i++) {
-    const [cx, cy] = toC(xData[i], yData[i]);
-    ctx.beginPath(); ctx.arc(cx, cy, 4, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
+  svg.append('defs').append('clipPath')
+    .attr('id', containerId + '-clip')
+    .append('rect')
+    .attr('x', M.left).attr('y', M.top)
+    .attr('width', pW).attr('height', pH);
+
+  // Pre-compute MSE grid (once)
+  const mseValues = new Float32Array(LN * LN);
+  for (let row = 0; row < LN; row++) {
+    const b = bMax - row / (LN - 1) * (bMax - bMin); // row 0 = bMax (top)
+    for (let col = 0; col < LN; col++) {
+      const w = wMin + col / (LN - 1) * (wMax - wMin);
+      mseValues[row * LN + col] = Math.min(computeMSE(w, b), MSE_CAP);
+    }
   }
 
-  // Legend (top-right, icon left of text)
-  const legX = M.left + pW - 178, legY = M.top + 8;
-  ctx.fillStyle = 'rgba(255,255,255,0.9)';
-  ctx.fillRect(legX - 6, legY - 5, 174, 46);
-  ctx.strokeStyle = '#ddd'; ctx.lineWidth = 1;
-  ctx.strokeRect(legX - 6, legY - 5, 174, 46);
+  // Contour levels and colour scale
+  const N_LEVELS = 25;
+  const thresholds = d3.range(N_LEVELS).map(i => i * MSE_CAP / (N_LEVELS - 1));
+  const colorScale = d3.scaleSequential(d3.interpolateYlOrRd).domain([0, MSE_CAP]);
 
-  ctx.fillStyle = '#2563eb'; ctx.strokeStyle = '#1d4ed8'; ctx.lineWidth = 1.2;
-  ctx.beginPath(); ctx.arc(legX + 6, legY + 9, 5, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
-  ctx.fillStyle = '#333'; ctx.font = '12px system-ui'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-  ctx.fillText('Sine function', legX + 16, legY + 9);
+  const contourData = d3.contours().size([LN, LN]).thresholds(thresholds)(mseValues);
 
-  ctx.strokeStyle = '#dc2626'; ctx.lineWidth = 2; ctx.setLineDash([5, 3]);
-  ctx.beginPath(); ctx.moveTo(legX, legY + 28); ctx.lineTo(legX + 18, legY + 28); ctx.stroke();
-  ctx.setLineDash([]);
-  ctx.fillStyle = '#333'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-  ctx.fillText(lineLabel, legX + 22, legY + 28);
-}
-
-// ── Loss landscape plot ───────────────────────────────────────────────────────
-function drawLossPlot(canvas, wVal, mseVal) {
-  const cssW = parseInt(canvas.style.width);
-  const cssH = parseInt(canvas.style.height);
-  const ctx  = canvas.getContext('2d');
-  const xMin = -2, xMax = 2, yMin = 0, yMax = 5000;
-  const { pW, pH, toC } = makeHelpers(cssW, cssH, xMin, xMax, yMin, yMax);
-  const xTicks = [-2, -1, 0, 1, 2];
-  const yTicks = [0, 1000, 2000, 3000, 4000, 5000];
-
-  ctx.clearRect(0, 0, cssW, cssH);
-  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cssW, cssH);
-
-  drawAxes(ctx, cssW, cssH, xMin, xMax, yMin, yMax, xTicks, yTicks, 'weight', 'MSE', 'Loss landscape',
-    v => v === 0 ? '0' : (v / 1000) + 'k');
-
-  // Dot + crosshairs clipped to plot area so point disappears off the top edge
-  const [cx, cy] = toC(wVal, mseVal);
-  const [axL, axB] = toC(xMin, yMin);
-  ctx.save();
-  ctx.beginPath(); ctx.rect(M.left, M.top, pW, pH); ctx.clip();
-
-  ctx.strokeStyle = '#fca5a5'; ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
-  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx, axB); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(axL, cy); ctx.stroke();
-  ctx.setLineDash([]);
-
-  ctx.fillStyle = '#dc2626'; ctx.strokeStyle = '#b91c1c'; ctx.lineWidth = 1.5;
-  ctx.beginPath(); ctx.arc(cx, cy, 7, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
-  ctx.restore();
-}
-
-// ── MSE helper ────────────────────────────────────────────────────────────────
-function computeMSE(xData, yData, w, b) {
-  return xData.reduce((sum, xi, i) => sum + (yData[i] - w * xi - b) ** 2, 0);
-}
-
-// ── Slider binding ────────────────────────────────────────────────────────────
-function bindSliders(ids, renderFn) {
-  ids.forEach(id => {
-    const el = document.getElementById(id);
-    const valEl = document.getElementById(id + '-val');
-    el.addEventListener('input', () => {
-      if (valEl) valEl.textContent = parseFloat(el.value).toFixed(2);
-      renderFn();
-    });
+  const proj = d3.geoTransform({
+    point(gx, gy) {
+      this.stream.point(M.left + gx / LN * pW, M.top + gy / LN * pH);
+    }
   });
+  const pathGen = d3.geoPath(proj);
+
+  // Draw static filled contour bands (clipped)
+  const contourGroup = svg.append('g')
+    .attr('clip-path', 'url(#' + containerId + '-clip)');
+
+  contourGroup.selectAll('path')
+    .data(contourData)
+    .join('path')
+    .attr('d', pathGen)
+    .attr('fill', d => colorScale(d.value))
+    .attr('stroke', 'none');
+
+  // Grid lines
+  [-2,-1,0,1,2].forEach(ty => {
+    svg.append('line')
+      .attr('x1', M.left).attr('x2', M.left + pW)
+      .attr('y1', bs(ty)).attr('y2', bs(ty))
+      .attr('stroke', 'rgba(255,255,255,0.25)').attr('stroke-width', 1);
+  });
+  [-2,-1,0,1,2].forEach(tx => {
+    svg.append('line')
+      .attr('x1', ws(tx)).attr('x2', ws(tx))
+      .attr('y1', M.top).attr('y2', M.top + pH)
+      .attr('stroke', 'rgba(255,255,255,0.25)').attr('stroke-width', 1);
+  });
+
+  // Axes
+  svg.append('g')
+    .attr('transform', `translate(0,${M.top + pH})`)
+    .call(d3.axisBottom(ws).tickValues([-2,-1,0,1,2]).tickSizeOuter(0))
+    .call(g => g.select('.domain').attr('stroke', '#333'))
+    .call(g => g.selectAll('text').style('font', '12px system-ui').attr('fill', '#444'));
+
+  svg.append('g')
+    .attr('transform', `translate(${M.left},0)`)
+    .call(d3.axisLeft(bs).tickValues([-2,-1,0,1,2]).tickSizeOuter(0))
+    .call(g => g.select('.domain').attr('stroke', '#333'))
+    .call(g => g.selectAll('text').style('font', '12px system-ui').attr('fill', '#444'));
+
+  // Axis labels
+  svg.append('text')
+    .attr('x', ws(0)).attr('y', H - 6)
+    .attr('text-anchor', 'middle')
+    .style('font', 'italic 14px Georgia, serif').attr('fill', '#444').text('weight');
+
+  svg.append('text')
+    .attr('transform', `translate(16,${bs(0)}) rotate(-90)`)
+    .attr('text-anchor', 'middle')
+    .style('font', 'italic 14px Georgia, serif').attr('fill', '#444').text('bias');
+
+  // Title
+  svg.append('text')
+    .attr('x', M.left + pW / 2).attr('y', 8)
+    .attr('text-anchor', 'middle').attr('dominant-baseline', 'hanging')
+    .style('font', 'bold 14px system-ui, sans-serif').attr('fill', '#222')
+    .text('Loss landscape');
+
+  // Crosshair group (clipped, dynamic)
+  const crosshairGroup = svg.append('g')
+    .attr('clip-path', 'url(#' + containerId + '-clip)');
+
+  const vLine = crosshairGroup.append('line')
+    .attr('stroke', '#fca5a5').attr('stroke-width', 1)
+    .style('stroke-dasharray', '4,3');
+  const hLine = crosshairGroup.append('line')
+    .attr('stroke', '#fca5a5').attr('stroke-width', 1)
+    .style('stroke-dasharray', '4,3');
+  const dot = crosshairGroup.append('circle')
+    .attr('r', 7)
+    .attr('fill', '#dc2626').attr('stroke', '#b91c1c').attr('stroke-width', 1.5);
+
+  function update(w, b) {
+    const cx = ws(w), cy = bs(b);
+    dot.attr('cx', cx).attr('cy', cy);
+    vLine.attr('x1', cx).attr('x2', cx).attr('y1', cy).attr('y2', M.top + pH);
+    hLine.attr('x1', cx).attr('x2', M.left).attr('y1', cy).attr('y2', cy);
+  }
+
+  return { update };
 }
 
 // ── Setup canvases ────────────────────────────────────────────────────────────
-const linCanvas = document.getElementById('canvas-lin');
-const lossFit   = document.getElementById('canvas-loss-fit');
-const lossLoss  = document.getElementById('canvas-loss-loss');
-[linCanvas, lossFit, lossLoss].forEach(setupCanvas);
+const linHandles = buildLinearFitSVG('svg-lin', 640, 400, 'Tuning a linear fit');
+
+let lossHandles = null; // built on first tab show
 
 // ── Linear fit ────────────────────────────────────────────────────────────────
 function renderLin() {
   const w = +document.getElementById('lin-w').value;
   const b = +document.getElementById('lin-b').value;
-  document.getElementById('lin-mse').textContent = computeMSE(linX, linY, w, b).toFixed(2);
-  drawLinearPlot(linCanvas, linX, linY, w, b,
-    `y = ${w.toFixed(2)}x + ${b.toFixed(2)}`, 'Tuning a linear fit');
+  document.getElementById('lin-mse').textContent = computeMSE(w, b).toFixed(2);
+  updatePredLine(linHandles, w, b, `y = ${w.toFixed(2)}x + ${b.toFixed(2)}`);
 }
-bindSliders(['lin-w', 'lin-b'], renderLin);
+
+['lin-w','lin-b'].forEach(id => {
+  const el = document.getElementById(id);
+  el.addEventListener('input', () => {
+    document.getElementById(id + '-val').textContent = parseFloat(el.value).toFixed(2);
+    renderLin();
+  });
+});
 
 // ── Loss landscape ────────────────────────────────────────────────────────────
+let lossFitHandles = null;
+
 function renderLoss() {
   const w = +document.getElementById('loss-w').value;
-  drawLinearPlot(lossFit, linX, linY, w, 0,
-    `y = ${w.toFixed(2)}x`, 'Linear fit (no bias)');
-  drawLossPlot(lossLoss, w, computeMSE(linX, linY, w, 0));
+  const b = +document.getElementById('loss-b').value;
+
+  if (!lossHandles) {
+    lossFitHandles = buildLinearFitSVG('svg-loss-fit', 360, 380, 'Linear fit');
+    lossHandles = buildLossLandscapeSVG('svg-loss-loss');
+  }
+
+  updatePredLine(lossFitHandles, w, b, `y = ${w.toFixed(2)}x + ${b.toFixed(2)}`);
+  lossHandles.update(w, b);
 }
-bindSliders(['loss-w'], renderLoss);
+
+['loss-w','loss-b'].forEach(id => {
+  const el = document.getElementById(id);
+  el.addEventListener('input', () => {
+    document.getElementById(id + '-val').textContent = parseFloat(el.value).toFixed(2);
+    renderLoss();
+  });
+});
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 document.querySelectorAll('.tab-btn').forEach(btn => {

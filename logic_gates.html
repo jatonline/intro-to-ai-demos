@@ -115,13 +115,16 @@
   }
   .dropdown-group select:focus { outline: 2px solid #1a73e8; }
 
-  canvas {
+  .plot-container {
     flex: 1 1 auto;
     min-width: 0;
     border-radius: 6px;
     background: white;
-    display: block;
   }
+
+  .plot-container svg { display: block; border-radius: 6px; }
+
+  .tick text { font-family: system-ui, sans-serif; }
 </style>
 </head>
 <body>
@@ -152,7 +155,7 @@
         <input type="range" id="and-b" min="-2" max="2" step="0.01" value="-0.2">
       </div>
     </div>
-    <canvas id="canvas-and" width="480" height="380"></canvas>
+    <div class="plot-container" id="svg-and"></div>
   </div>
 
   <!-- XOR Gate -->
@@ -172,7 +175,7 @@
         <input type="range" id="xor-b" min="-2" max="2" step="0.01" value="-0.2">
       </div>
     </div>
-    <canvas id="canvas-xor" width="480" height="380"></canvas>
+    <div class="plot-container" id="svg-xor"></div>
   </div>
 
   <!-- XOR with Activation -->
@@ -200,363 +203,288 @@
         </select>
       </div>
     </div>
-    <canvas id="canvas-act" width="480" height="380"></canvas>
+    <div class="plot-container" id="svg-act"></div>
   </div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
 <script>
 // ── Activation functions ──────────────────────────────────────────────────────
 const activations = {
   sigmoid: x => 1 / (1 + Math.exp(-x)),
-  relu: x => Math.max(0, x),
-  tanh: x => Math.tanh(x),
+  relu:    x => Math.max(0, x),
+  tanh:    x => Math.tanh(x),
 };
 
-// ── Canvas drawing ────────────────────────────────────────────────────────────
+// ── Layout constants ──────────────────────────────────────────────────────────
 const M = { top: 44, right: 24, bottom: 52, left: 56 };
+const SVG_W = 480, SVG_H = 380;
+const plotW = SVG_W - M.left - M.right;
+const plotH = SVG_H - M.top  - M.bottom;
+const xMin = -0.5, xMax = 1.5, yMin = -0.5, yMax = 1.5;
+const N = 200; // contour grid resolution
 
-function setupCanvas(canvas) {
-  const dpr = window.devicePixelRatio || 1;
-  const cssW = canvas.width, cssH = canvas.height;
-  canvas.width = cssW * dpr;
-  canvas.height = cssH * dpr;
-  canvas.style.width = cssW + 'px';
-  canvas.style.height = cssH + 'px';
-  const ctx = canvas.getContext('2d');
-  ctx.scale(dpr, dpr);
-  return { ctx, cssW, cssH };
+const xScale = d3.scaleLinear([xMin, xMax], [M.left, M.left + plotW]);
+const yScale = d3.scaleLinear([yMin, yMax], [M.top + plotH, M.top]); // inverted
+
+// ── geoTransform: grid [0,N) → SVG pixels ────────────────────────────────────
+// Row 0 in the grid = yMax (top of plot). Both grid-y and SVG-y increase downward,
+// so no sign flip is needed in the transform.
+const projection = d3.geoTransform({
+  point(gx, gy) {
+    this.stream.point(
+      M.left + gx / N * plotW,
+      M.top  + gy / N * plotH
+    );
+  }
+});
+const pathGen = d3.geoPath(projection);
+
+// ── Contour grid computation ──────────────────────────────────────────────────
+function computeGrid(fn) {
+  const values = new Float32Array(N * N);
+  for (let row = 0; row < N; row++) {
+    const x2 = yMax - row / (N - 1) * (yMax - yMin); // row 0 → yMax
+    for (let col = 0; col < N; col++) {
+      const x1 = xMin + col / (N - 1) * (xMax - xMin);
+      values[row * N + col] = fn(x1, x2);
+    }
+  }
+  return values;
 }
 
-function makePlotHelpers(cssW, cssH) {
-  const plotW = cssW - M.left - M.right;
-  const plotH = cssH - M.top - M.bottom;
-  const xMin = -0.5, xMax = 1.5, yMin = -0.5, yMax = 1.5;
+// ── Build SVG scaffold (called once per panel) ────────────────────────────────
+function buildGateSVG(containerId, class0, class1) {
+  const svg = d3.select('#' + containerId)
+    .append('svg')
+    .attr('width', SVG_W)
+    .attr('height', SVG_H);
 
-  function toCanvas(x1, x2) {
-    return [
-      M.left + (x1 - xMin) / (xMax - xMin) * plotW,
-      M.top  + plotH - (x2 - yMin) / (yMax - yMin) * plotH,
-    ];
-  }
+  // Clip path — keeps contour fill inside the plot area
+  svg.append('defs').append('clipPath')
+    .attr('id', containerId + '-clip')
+    .append('rect')
+    .attr('x', M.left).attr('y', M.top)
+    .attr('width', plotW).attr('height', plotH);
 
-  return { plotW, plotH, xMin, xMax, yMin, yMax, toCanvas };
-}
+  // Class-0 background (gray)
+  svg.append('rect')
+    .attr('x', M.left).attr('y', M.top)
+    .attr('width', plotW).attr('height', plotH)
+    .attr('fill', 'rgba(160,160,160,0.35)');
 
-function drawPlot(canvas, computeValue, threshold, class0, class1, title) {
-  const dpr = window.devicePixelRatio || 1;
-  const cssW = parseInt(canvas.style.width);
-  const cssH = parseInt(canvas.style.height);
-  const ctx = canvas.getContext('2d');
-  const { plotW, plotH, xMin, xMax, yMin, yMax, toCanvas } = makePlotHelpers(cssW, cssH);
+  // Clipped group for contour fill + boundary
+  const contourGroup = svg.append('g')
+    .attr('clip-path', 'url(#' + containerId + '-clip)');
 
-  // Clear
-  ctx.clearRect(0, 0, cssW, cssH);
-  ctx.fillStyle = '#fff';
-  ctx.fillRect(0, 0, cssW, cssH);
+  // Grid lines
+  [0, 1].forEach(tx => {
+    svg.append('line')
+      .attr('x1', xScale(tx)).attr('x2', xScale(tx))
+      .attr('y1', M.top).attr('y2', M.top + plotH)
+      .attr('stroke', '#e8e8e8').attr('stroke-width', 1);
+  });
+  [0, 1].forEach(ty => {
+    svg.append('line')
+      .attr('x1', M.left).attr('x2', M.left + plotW)
+      .attr('y1', yScale(ty)).attr('y2', yScale(ty))
+      .attr('stroke', '#e8e8e8').attr('stroke-width', 1);
+  });
 
-  // ── Filled region ─────────────────────────────────────────────────────────
-  // Use an offscreen canvas for the fill at plot resolution
-  const offW = Math.round(plotW * dpr);
-  const offH = Math.round(plotH * dpr);
-  const off = document.createElement('canvas');
-  off.width = offW; off.height = offH;
-  const octx = off.getContext('2d');
-  const imgData = octx.createImageData(offW, offH);
-  const d = imgData.data;
+  // X axis
+  svg.append('g')
+    .attr('transform', `translate(0,${M.top + plotH})`)
+    .call(
+      d3.axisBottom(xScale)
+        .tickValues([0, 1])
+        .tickSizeOuter(0)
+        .tickSizeInner(5)
+    )
+    .call(g => g.select('.domain').attr('stroke', '#333'))
+    .call(g => g.selectAll('text')
+      .style('font', '13px system-ui, sans-serif')
+      .attr('fill', '#444'));
 
-  for (let py = 0; py < offH; py++) {
-    for (let px = 0; px < offW; px++) {
-      const x1 = xMin + px / offW * (xMax - xMin);
-      const x2 = yMin + (offH - py) / offH * (yMax - yMin);
-      const val = computeValue(x1, x2);
-      const i = (py * offW + px) * 4;
-      if (val < threshold) {
-        d[i]   = 160; d[i+1] = 160; d[i+2] = 160; d[i+3] = 90;
-      } else {
-        d[i]   = 255; d[i+1] = 255; d[i+2] = 255; d[i+3] = 255;
-      }
-    }
-  }
-  octx.putImageData(imgData, 0, 0);
-  ctx.drawImage(off, M.left, M.top, plotW, plotH);
-
-  // ── Decision boundary via marching squares ────────────────────────────────
-  const N = 180;
-  const vals = [];
-  for (let j = 0; j <= N; j++) {
-    vals[j] = new Float32Array(N + 1);
-    for (let i = 0; i <= N; i++) {
-      const x1 = xMin + i / N * (xMax - xMin);
-      const x2 = yMin + j / N * (yMax - yMin);
-      vals[j][i] = computeValue(x1, x2) - threshold;
-    }
-  }
-
-  ctx.beginPath();
-  ctx.strokeStyle = '#111';
-  ctx.lineWidth = 2;
-
-  for (let j = 0; j < N; j++) {
-    for (let i = 0; i < N; i++) {
-      const v00 = vals[j][i];
-      const v10 = vals[j][i + 1];
-      const v01 = vals[j + 1][i];
-      const v11 = vals[j + 1][i + 1];
-
-      const pts = [];
-
-      // bottom edge (j constant)
-      if (v00 * v10 < 0) {
-        const t = v00 / (v00 - v10);
-        pts.push(toCanvas(xMin + (i + t) / N * (xMax - xMin), yMin + j / N * (yMax - yMin)));
-      }
-      // right edge (i+1 constant)
-      if (v10 * v11 < 0) {
-        const t = v10 / (v10 - v11);
-        pts.push(toCanvas(xMin + (i + 1) / N * (xMax - xMin), yMin + (j + t) / N * (yMax - yMin)));
-      }
-      // top edge (j+1 constant)
-      if (v01 * v11 < 0) {
-        const t = v01 / (v01 - v11);
-        pts.push(toCanvas(xMin + (i + t) / N * (xMax - xMin), yMin + (j + 1) / N * (yMax - yMin)));
-      }
-      // left edge (i constant)
-      if (v00 * v01 < 0) {
-        const t = v00 / (v00 - v01);
-        pts.push(toCanvas(xMin + i / N * (xMax - xMin), yMin + (j + t) / N * (yMax - yMin)));
-      }
-
-      if (pts.length >= 2) {
-        ctx.moveTo(pts[0][0], pts[0][1]);
-        ctx.lineTo(pts[1][0], pts[1][1]);
-        if (pts.length === 4) {
-          ctx.moveTo(pts[2][0], pts[2][1]);
-          ctx.lineTo(pts[3][0], pts[3][1]);
-        }
-      }
-    }
-  }
-  ctx.stroke();
-
-  // ── Axes ──────────────────────────────────────────────────────────────────
-  ctx.strokeStyle = '#333';
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  const [x0, y0] = toCanvas(xMin, yMin);
-  const [x1e, y1e] = toCanvas(xMax, yMin);
-  const [xyl, yyl] = toCanvas(xMin, yMax);
-  ctx.moveTo(x0, y0); ctx.lineTo(x1e, y1e); // x-axis
-  ctx.moveTo(x0, y0); ctx.lineTo(xyl, yyl); // y-axis
-  ctx.stroke();
-
-  // Grid lines (light)
-  ctx.strokeStyle = '#e8e8e8';
-  ctx.lineWidth = 1;
-  for (const tx of [0, 1]) {
-    const [cx] = toCanvas(tx, 0);
-    const [, cyTop] = toCanvas(0, yMax);
-    const [, cyBot] = toCanvas(0, yMin);
-    ctx.beginPath(); ctx.moveTo(cx, cyTop); ctx.lineTo(cx, cyBot); ctx.stroke();
-  }
-  for (const ty of [0, 1]) {
-    const [, cy] = toCanvas(0, ty);
-    const [cxL] = toCanvas(xMin, 0);
-    const [cxR] = toCanvas(xMax, 0);
-    ctx.beginPath(); ctx.moveTo(cxL, cy); ctx.lineTo(cxR, cy); ctx.stroke();
-  }
-
-  // Tick marks + labels
-  ctx.fillStyle = '#444';
-  ctx.font = '13px system-ui, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'top';
-  for (const tx of [0, 1]) {
-    const [cx, cy] = toCanvas(tx, yMin);
-    ctx.beginPath(); ctx.strokeStyle = '#333'; ctx.lineWidth = 1.5;
-    ctx.moveTo(cx, cy); ctx.lineTo(cx, cy + 5); ctx.stroke();
-    ctx.fillText(tx, cx, cy + 7);
-  }
-  ctx.textAlign = 'right';
-  ctx.textBaseline = 'middle';
-  for (const ty of [0, 1]) {
-    const [cx, cy] = toCanvas(xMin, ty);
-    ctx.beginPath(); ctx.strokeStyle = '#333'; ctx.lineWidth = 1.5;
-    ctx.moveTo(cx, cy); ctx.lineTo(cx - 5, cy); ctx.stroke();
-    ctx.fillText(ty, cx - 7, cy);
-  }
+  // Y axis
+  svg.append('g')
+    .attr('transform', `translate(${M.left},0)`)
+    .call(
+      d3.axisLeft(yScale)
+        .tickValues([0, 1])
+        .tickSizeOuter(0)
+        .tickSizeInner(5)
+    )
+    .call(g => g.select('.domain').attr('stroke', '#333'))
+    .call(g => g.selectAll('text')
+      .style('font', '13px system-ui, sans-serif')
+      .attr('fill', '#444'));
 
   // Axis labels
-  ctx.fillStyle = '#333';
-  ctx.font = 'italic 14px Georgia, serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'bottom';
-  const [midX] = toCanvas((xMin + xMax) / 2, yMin);
-  ctx.fillText('x₁', midX, cssH - 4);
+  svg.append('text')
+    .attr('x', xScale((xMin + xMax) / 2))
+    .attr('y', SVG_H - 4)
+    .attr('text-anchor', 'middle')
+    .style('font', 'italic 14px Georgia, serif')
+    .attr('fill', '#333')
+    .text('x₁');
 
-  ctx.save();
-  const [, midY] = toCanvas(xMin, (yMin + yMax) / 2);
-  ctx.translate(14, midY);
-  ctx.rotate(-Math.PI / 2);
-  ctx.fillText('x₂', 0, 0);
-  ctx.restore();
+  svg.append('text')
+    .attr('transform', `translate(14,${yScale((yMin + yMax) / 2)}) rotate(-90)`)
+    .attr('text-anchor', 'middle')
+    .style('font', 'italic 14px Georgia, serif')
+    .attr('fill', '#333')
+    .text('x₂');
 
-  // Title
-  ctx.font = 'bold 14px system-ui, sans-serif';
-  ctx.fillStyle = '#222';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'top';
-  ctx.fillText(title, M.left + plotW / 2, 8);
+  // Title (updated on each render)
+  const titleEl = svg.append('text')
+    .attr('x', M.left + plotW / 2)
+    .attr('y', 8)
+    .attr('text-anchor', 'middle')
+    .attr('dominant-baseline', 'hanging')
+    .style('font', 'bold 14px system-ui, sans-serif')
+    .attr('fill', '#222');
 
-  // ── Scatter points ────────────────────────────────────────────────────────
-  const R = 8;
+  // Scatter — class 0 (blue circles)
+  class0.forEach(([px, py]) => {
+    svg.append('circle')
+      .attr('cx', xScale(px)).attr('cy', yScale(py)).attr('r', 8)
+      .attr('fill', '#2563eb').attr('stroke', '#1d4ed8').attr('stroke-width', 1.5);
+  });
 
-  // Class 0 – blue circles
-  ctx.fillStyle = '#2563eb';
-  ctx.strokeStyle = '#1d4ed8';
-  ctx.lineWidth = 1.5;
-  for (const [px, py] of class0) {
-    const [cx, cy] = toCanvas(px, py);
-    ctx.beginPath();
-    ctx.arc(cx, cy, R, 0, 2 * Math.PI);
-    ctx.fill();
-    ctx.stroke();
-  }
+  // Scatter — class 1 (red upward triangles via d3.symbol)
+  const triPath = d3.symbol().type(d3.symbolTriangle).size(210)();
+  class1.forEach(([px, py]) => {
+    svg.append('path')
+      .attr('d', triPath)
+      .attr('transform', `translate(${xScale(px)},${yScale(py)})`)
+      .attr('fill', '#dc2626').attr('stroke', '#b91c1c').attr('stroke-width', 1.5);
+  });
 
-  // Class 1 – red triangles
-  ctx.fillStyle = '#dc2626';
-  ctx.strokeStyle = '#b91c1c';
-  ctx.lineWidth = 1.5;
-  for (const [px, py] of class1) {
-    const [cx, cy] = toCanvas(px, py);
-    ctx.beginPath();
-    ctx.moveTo(cx, cy - R - 1);
-    ctx.lineTo(cx + R + 1, cy + R);
-    ctx.lineTo(cx - R - 1, cy + R);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-  }
+  // Legend
+  const lx = M.left + plotW - 4;
+  const ly = M.top + 8;
 
-  // ── Legend ────────────────────────────────────────────────────────────────
-  const lx = M.left + plotW - 4, ly = M.top + 8;
-  ctx.textAlign = 'right';
-  ctx.textBaseline = 'middle';
-  ctx.font = '12px system-ui, sans-serif';
+  svg.append('circle')
+    .attr('cx', lx - 52).attr('cy', ly + 1).attr('r', 5)
+    .attr('fill', '#2563eb').attr('stroke', '#1d4ed8').attr('stroke-width', 1);
+  svg.append('text')
+    .attr('x', lx).attr('y', ly + 1)
+    .attr('text-anchor', 'end').attr('dominant-baseline', 'middle')
+    .style('font', '12px system-ui, sans-serif').attr('fill', '#333')
+    .text('Class 0');
 
-  ctx.fillStyle = '#2563eb';
-  ctx.strokeStyle = '#1d4ed8';
-  ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.arc(lx - 48, ly + 1, 5, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
-  ctx.fillStyle = '#333';
-  ctx.fillText('Class 0', lx, ly + 1);
+  const smallTri = d3.symbol().type(d3.symbolTriangle).size(55)();
+  svg.append('path')
+    .attr('d', smallTri)
+    .attr('transform', `translate(${lx - 52},${ly + 20})`)
+    .attr('fill', '#dc2626').attr('stroke', '#b91c1c').attr('stroke-width', 1);
+  svg.append('text')
+    .attr('x', lx).attr('y', ly + 20)
+    .attr('text-anchor', 'end').attr('dominant-baseline', 'middle')
+    .style('font', '12px system-ui, sans-serif').attr('fill', '#333')
+    .text('Class 1');
 
-  ctx.fillStyle = '#dc2626';
-  ctx.strokeStyle = '#b91c1c';
-  ctx.beginPath();
-  ctx.moveTo(lx - 48, ly + 18);
-  ctx.lineTo(lx - 43, ly + 25);
-  ctx.lineTo(lx - 53, ly + 25);
-  ctx.closePath();
-  ctx.fill(); ctx.stroke();
-  ctx.fillStyle = '#333';
-  ctx.fillText('Class 1', lx, ly + 22);
+  return { contourGroup, titleEl };
+}
+
+// ── Update contour fill + boundary ────────────────────────────────────────────
+const contourGen = d3.contours().size([N, N]);
+
+function updateGate({ contourGroup, titleEl }, fn, threshold, titleStr) {
+  const values = computeGrid(fn);
+  const contours = contourGen.thresholds([threshold])(values);
+
+  contourGroup.selectAll('path').remove();
+
+  // White fill = class-1 region (fn >= threshold)
+  contourGroup.selectAll('path.fill')
+    .data(contours)
+    .join('path')
+    .attr('class', 'fill')
+    .attr('d', pathGen)
+    .attr('fill', 'white')
+    .attr('stroke', 'none');
+
+  // Black stroke = decision boundary
+  contourGroup.selectAll('path.boundary')
+    .data(contours)
+    .join('path')
+    .attr('class', 'boundary')
+    .attr('d', pathGen)
+    .attr('fill', 'none')
+    .attr('stroke', '#111')
+    .attr('stroke-width', 2);
+
+  titleEl.text(titleStr);
 }
 
 // ── AND gate ──────────────────────────────────────────────────────────────────
-const andCanvas = document.getElementById('canvas-and');
-const { ctx: _, cssW: andW, cssH: andH } = setupCanvas(andCanvas);
-
 const andClass0 = [[0,1],[1,0],[0,0]];
 const andClass1 = [[1,1]];
-
-function getAndParams() {
-  return {
-    w1: parseFloat(document.getElementById('and-w1').value),
-    w2: parseFloat(document.getElementById('and-w2').value),
-    b:  parseFloat(document.getElementById('and-b').value),
-  };
-}
+const andHandles = buildGateSVG('svg-and', andClass0, andClass1);
 
 function renderAND() {
-  const { w1, w2, b } = getAndParams();
-  const computeAND = (x1, x2) => w1 * x1 + w2 * x2 + b;
+  const w1 = +document.getElementById('and-w1').value;
+  const w2 = +document.getElementById('and-w2').value;
+  const b  = +document.getElementById('and-b').value;
 
   let title;
   if (Math.abs(w2) > 1e-6) {
-    const slope = (-w1 / w2).toFixed(2);
-    const intercept = (-b / w2).toFixed(2);
-    title = `Decision boundary: x₂ = ${slope}·x₁ + ${intercept}`;
+    title = `Decision boundary: x₂ = ${(-w1/w2).toFixed(2)}·x₁ + ${(-b/w2).toFixed(2)}`;
   } else if (Math.abs(w1) > 1e-6) {
-    title = `Decision boundary: x₁ = ${(-b / w1).toFixed(2)}`;
+    title = `Decision boundary: x₁ = ${(-b/w1).toFixed(2)}`;
   } else {
     title = 'Decision boundary: undefined (w₁=w₂=0)';
   }
 
-  drawPlot(andCanvas, computeAND, 0, andClass0, andClass1, title);
+  updateGate(andHandles, (x1, x2) => w1*x1 + w2*x2 + b, 0, title);
 }
 
 ['and-w1','and-w2','and-b'].forEach(id => {
   const el = document.getElementById(id);
-  const valEl = document.getElementById(id + '-val');
   el.addEventListener('input', () => {
-    valEl.textContent = parseFloat(el.value).toFixed(2);
+    document.getElementById(id + '-val').textContent = parseFloat(el.value).toFixed(2);
     renderAND();
   });
 });
 
 // ── XOR gate ──────────────────────────────────────────────────────────────────
-const xorCanvas = document.getElementById('canvas-xor');
-setupCanvas(xorCanvas);
-
 const xorClass0 = [[0,0],[1,1]];
 const xorClass1 = [[1,0],[0,1]];
-
-function getXORParams() {
-  return {
-    w1: parseFloat(document.getElementById('xor-w1').value),
-    w2: parseFloat(document.getElementById('xor-w2').value),
-    b:  parseFloat(document.getElementById('xor-b').value),
-  };
-}
+const xorHandles = buildGateSVG('svg-xor', xorClass0, xorClass1);
 
 function renderXOR() {
-  const { w1, w2, b } = getXORParams();
-  const computeXOR = (x1, x2) => w1 * x1 + w2 * x2 + b;
+  const w1 = +document.getElementById('xor-w1').value;
+  const w2 = +document.getElementById('xor-w2').value;
+  const b  = +document.getElementById('xor-b').value;
 
   let title;
   if (Math.abs(w2) > 1e-6) {
-    const slope = (-w1 / w2).toFixed(2);
-    const intercept = (-b / w2).toFixed(2);
-    title = `Decision boundary: x₂ = ${slope}·x₁ + ${intercept}`;
+    title = `Decision boundary: x₂ = ${(-w1/w2).toFixed(2)}·x₁ + ${(-b/w2).toFixed(2)}`;
   } else if (Math.abs(w1) > 1e-6) {
-    title = `Decision boundary: x₁ = ${(-b / w1).toFixed(2)}`;
+    title = `Decision boundary: x₁ = ${(-b/w1).toFixed(2)}`;
   } else {
     title = 'Decision boundary: undefined (w₁=w₂=0)';
   }
 
-  drawPlot(xorCanvas, computeXOR, 0, xorClass0, xorClass1, title);
+  updateGate(xorHandles, (x1, x2) => w1*x1 + w2*x2 + b, 0, title);
 }
 
 ['xor-w1','xor-w2','xor-b'].forEach(id => {
   const el = document.getElementById(id);
-  const valEl = document.getElementById(id + '-val');
   el.addEventListener('input', () => {
-    valEl.textContent = parseFloat(el.value).toFixed(2);
+    document.getElementById(id + '-val').textContent = parseFloat(el.value).toFixed(2);
     renderXOR();
   });
 });
 
 // ── XOR with activation ───────────────────────────────────────────────────────
-const actCanvas = document.getElementById('canvas-act');
-setupCanvas(actCanvas);
-
 const actClass0 = [[0,0],[1,1]];
 const actClass1 = [[1,0],[0,1]];
+const actHandles = buildGateSVG('svg-act', actClass0, actClass1);
 
-// Initial weights: [[2, 0.8, 0.8], [1.2, 1, -1], [0.5, -2.5, -0.1]]
-const initWeights = [[1, 1, 0], [1, 1, 0], [1, 1, 0]];
-const rowLabels = ['neuron 1', 'neuron 2', 'neuron 3'];
-const colLabels = ['w₁', 'w₂', 'b'];
+const initWeights = [[1,1,0],[1,1,0],[1,1,0]];
+const rowLabels = ['neuron 1','neuron 2','neuron 3'];
 
 const matrixBody = document.getElementById('matrix-body');
 initWeights.forEach((row, ri) => {
@@ -567,9 +495,7 @@ initWeights.forEach((row, ri) => {
   row.forEach((val, ci) => {
     const td = document.createElement('td');
     const inp = document.createElement('input');
-    inp.type = 'number';
-    inp.step = '0.1';
-    inp.value = val;
+    inp.type = 'number'; inp.step = '0.1'; inp.value = val;
     inp.id = `w_${ri}_${ci}`;
     inp.addEventListener('input', renderAct);
     td.appendChild(inp);
@@ -577,10 +503,6 @@ initWeights.forEach((row, ri) => {
   });
   matrixBody.appendChild(tr);
 });
-
-// Add header row (col labels) at the top
-const thead = matrixBody.closest('table').querySelector('thead tr');
-// already in HTML
 
 document.getElementById('act-fn').addEventListener('change', renderAct);
 
@@ -593,14 +515,16 @@ function getWeights() {
 function renderAct() {
   const W = getWeights();
   const fn = activations[document.getElementById('act-fn').value];
-
-  const computeAct = (x1, x2) => {
-    const n1 = fn(W[0][0] * x1 + W[0][1] * x2 + W[0][2]);
-    const n2 = fn(W[1][0] * x1 + W[1][1] * x2 + W[1][2]);
-    return n1 * W[2][0] + n2 * W[2][1] + W[2][2];
-  };
-
-  drawPlot(actCanvas, computeAct, 0.5, actClass0, actClass1, 'XOR with activation function');
+  updateGate(
+    actHandles,
+    (x1, x2) => {
+      const n1 = fn(W[0][0]*x1 + W[0][1]*x2 + W[0][2]);
+      const n2 = fn(W[1][0]*x1 + W[1][1]*x2 + W[1][2]);
+      return n1*W[2][0] + n2*W[2][1] + W[2][2];
+    },
+    0.5,
+    'XOR with activation function'
+  );
 }
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
@@ -610,7 +534,6 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
     btn.classList.add('active');
     document.getElementById('panel-' + btn.dataset.tab).classList.add('active');
-    // Re-render the newly visible canvas
     if (btn.dataset.tab === 'and') renderAND();
     else if (btn.dataset.tab === 'xor') renderXOR();
     else renderAct();
@@ -619,7 +542,6 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
 
 // ── Initial render ────────────────────────────────────────────────────────────
 renderAND();
-// XOR and Act are rendered on first tab click
 </script>
 </body>
 </html>
