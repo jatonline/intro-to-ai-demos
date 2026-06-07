@@ -123,7 +123,7 @@
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
-<script src="https://unpkg.com/d3-3d/build/d3-3d.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
 <script>
 // ── Data ──────────────────────────────────────────────────────────────────────
 const linX = [];
@@ -254,135 +254,136 @@ function updatePredLine({ predLine, legendLabel, xs, ys, xMin, xMax }, w, b, lab
   legendLabel.text(labelStr);
 }
 
-// ── Build loss landscape SVG (3D surface, d3-3d) ─────────────────────────────
+// ── Build loss landscape (Three.js 3D surface) ───────────────────────────────
 function buildLossLandscape3D(containerId) {
-  const W = 300, H = 380;
-  const cx = W / 2, cy = H * 0.52;
-  const viewScale = 95;
+  const W = 300, H = 356;
   const N = 50;
   const MSE_CAP = 6000;
 
-  const wVals = d3.range(N).map(i => -2 + i * 4 / (N - 1));
-  const bVals = d3.range(N).map(i => -2 + i * 4 / (N - 1));
+  const wVals = Array.from({length: N}, (_, i) => -2 + i * 4 / (N - 1));
+  const bVals = Array.from({length: N}, (_, i) => -2 + i * 4 / (N - 1));
 
-  const scaleW = d3.scaleLinear([-2, 2], [-1,  1]);
-  const scaleB = d3.scaleLinear([-2, 2], [-1,  1]);
-  const scaleZ = d3.scaleLinear([0, MSE_CAP], [0, 1.5]);
+  // Title div above canvas
+  const wrapper = document.getElementById(containerId);
+  const titleDiv = document.createElement('div');
+  titleDiv.style.cssText = 'height:24px;line-height:24px;text-align:center;font:bold 14px system-ui,sans-serif;color:#222;';
+  titleDiv.textContent = 'Loss landscape (drag to rotate)';
+  wrapper.appendChild(titleDiv);
+
+  const canvas = document.createElement('canvas');
+  canvas.width = W; canvas.height = H;
+  canvas.style.cssText = 'display:block;border-radius:6px;cursor:grab;';
+  wrapper.appendChild(canvas);
+
+  // Three.js setup
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer.setSize(W, H);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setClearColor(0xffffff);
+
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(45, W / H, 0.1, 100);
+  camera.position.set(3, 2, 3);
+  camera.lookAt(0, 0, 0);
+
+  scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+  const sun = new THREE.DirectionalLight(0xffffff, 0.8);
+  sun.position.set(3, 5, 3);
+  scene.add(sun);
+
+  // Pivot group — drag rotates this
+  const pivot = new THREE.Group();
+  pivot.rotation.y = 0.5;
+  pivot.rotation.x = -0.3;
+  scene.add(pivot);
+
+  // Surface mesh with vertex colours
+  // Coordinate space: x = weight*0.5 ∈ [-1,1], y = mse/MSE_CAP*2-1 ∈ [-1,1], z = bias*0.5 ∈ [-1,1]
   const colorScale = d3.scaleSequential(d3.interpolateYlOrRd).domain([0, MSE_CAP]);
+  const posArr = new Float32Array(N * N * 3);
+  const colArr = new Float32Array(N * N * 3);
 
-  // Flat N×N grid, row = bias index, col = weight index
-  const gridData = [];
   for (let bi = 0; bi < N; bi++) {
     for (let wi = 0; wi < N; wi++) {
+      const idx = bi * N + wi;
       const mse = Math.min(computeMSE(wVals[wi], bVals[bi]), MSE_CAP);
-      gridData.push({ x: scaleW(wVals[wi]), y: scaleZ(mse), z: scaleB(bVals[bi]), mse });
+      posArr[idx * 3]     = wVals[wi] * 0.5;
+      posArr[idx * 3 + 1] = mse / MSE_CAP * 2 - 1;
+      posArr[idx * 3 + 2] = bVals[bi] * 0.5;
+      const c = new THREE.Color(colorScale(mse));
+      colArr[idx * 3] = c.r; colArr[idx * 3 + 1] = c.g; colArr[idx * 3 + 2] = c.b;
     }
   }
 
-  let alpha = 0.5, beta = -0.5;
-  let curW = 0, curB = 0;
-
-  const svg = d3.select('#' + containerId)
-    .append('svg').attr('width', W).attr('height', H);
-
-  svg.append('text')
-    .attr('x', W / 2).attr('y', 8)
-    .attr('text-anchor', 'middle').attr('dominant-baseline', 'hanging')
-    .style('font', 'bold 14px system-ui, sans-serif').attr('fill', '#222')
-    .text('Loss landscape (drag to rotate)');
-
-  const surfaceG = svg.append('g').attr('class', 'surface');
-  const axesG    = svg.append('g').attr('class', 'axes');
-  const markerG  = svg.append('g').attr('class', 'marker');
-
-  const dropLine = markerG.append('line')
-    .attr('stroke', '#1d4ed8').attr('stroke-width', 1.5)
-    .style('stroke-dasharray', '4,3');
-  const markerDot = markerG.append('circle')
-    .attr('r', 6)
-    .attr('fill', '#dc2626').attr('stroke', '#991b1b').attr('stroke-width', 1.5);
-
-  function projectPoint(x, y, z) {
-    const pt3d = d3._3d()
-      .shape('POINT3D')
-      .x(d => d.x).y(d => d.y).z(d => d.z)
-      .origin([cx, cy])
-      .rotateY(alpha).rotateX(beta)
-      .scale(viewScale);
-    return pt3d([{ x, y, z }])[0];
+  const triIdx = [];
+  for (let bi = 0; bi < N - 1; bi++) {
+    for (let wi = 0; wi < N - 1; wi++) {
+      const a = bi * N + wi, b = a + 1, c = (bi + 1) * N + wi, d = c + 1;
+      triIdx.push(a, b, c, b, d, c);
+    }
   }
 
-  function renderSurface() {
-    const grid3d = d3._3d()
-      .shape('GRID', N)
-      .x(d => d.x).y(d => d.y).z(d => d.z)
-      .origin([cx, cy])
-      .rotateY(alpha).rotateX(beta)
-      .scale(viewScale);
-    const faces = grid3d(gridData);
-    surfaceG.selectAll('path')
-      .data(faces)
-      .join('path')
-      .attr('d', grid3d.draw)
-      .attr('fill', face => colorScale(d3.mean(face, pt => pt.mse)))
-      .attr('stroke', 'rgba(0,0,0,0.07)')
-      .attr('stroke-width', 0.4)
-      .sort(grid3d.sort);
+  const surfGeom = new THREE.BufferGeometry();
+  surfGeom.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+  surfGeom.setAttribute('color',    new THREE.BufferAttribute(colArr, 3));
+  surfGeom.setIndex(triIdx);
+  surfGeom.computeVertexNormals();
+  pivot.add(new THREE.Mesh(surfGeom,
+    new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide })));
+
+  // Axis lines from floor corner (-1, -1, -1)
+  [
+    [[-1,-1,-1],[1,-1,-1]],   // weight (x)
+    [[-1,-1,-1],[-1,-1,1]],  // bias   (z)
+    [[-1,-1,-1],[-1,1,-1]],  // MSE    (y)
+  ].forEach(([p1, p2]) => {
+    const g = new THREE.BufferGeometry().setFromPoints(
+      [p1, p2].map(p => new THREE.Vector3(...p)));
+    pivot.add(new THREE.Line(g, new THREE.LineBasicMaterial({ color: 0x888888 })));
+  });
+
+  // Marker sphere
+  const markerMesh = new THREE.Mesh(
+    new THREE.SphereGeometry(0.07, 16, 8),
+    new THREE.MeshPhongMaterial({ color: 0xdc2626, shininess: 100 }));
+  pivot.add(markerMesh);
+
+  // Drop line (2-point buffer, updated dynamically)
+  const dropPos = new Float32Array(6);
+  const dropGeom = new THREE.BufferGeometry();
+  dropGeom.setAttribute('position', new THREE.BufferAttribute(dropPos, 3));
+  pivot.add(new THREE.Line(dropGeom, new THREE.LineBasicMaterial({ color: 0x1d4ed8 })));
+
+  function render() { renderer.render(scene, camera); }
+
+  function updateMarker(w, b) {
+    const mse = Math.min(computeMSE(w, b), MSE_CAP);
+    const x = w * 0.5, y = mse / MSE_CAP * 2 - 1, z = b * 0.5;
+    markerMesh.position.set(x, y, z);
+    dropPos[0] = x; dropPos[1] = -1; dropPos[2] = z;
+    dropPos[3] = x; dropPos[4] = y;  dropPos[5] = z;
+    dropGeom.attributes.position.needsUpdate = true;
+    render();
   }
 
-  function renderAxes() {
-    axesG.selectAll('*').remove();
-    const origin = projectPoint(-1, 0, -1);
-    const wEnd   = projectPoint( 1, 0, -1);
-    const bEnd   = projectPoint(-1, 0,  1);
-    const mEnd   = projectPoint(-1, scaleZ(MSE_CAP), -1);
+  updateMarker(0, 0);
 
-    [
-      { from: origin, to: wEnd, label: 'weight' },
-      { from: origin, to: bEnd, label: 'bias'   },
-      { from: origin, to: mEnd, label: 'MSE'    },
-    ].forEach(({ from, to, label }) => {
-      axesG.append('line')
-        .attr('x1', from.projected.x).attr('y1', from.projected.y)
-        .attr('x2', to.projected.x).attr('y2', to.projected.y)
-        .attr('stroke', '#888').attr('stroke-width', 1.5);
-      axesG.append('text')
-        .attr('x', to.projected.x).attr('y', to.projected.y - 7)
-        .attr('text-anchor', 'middle')
-        .style('font', 'italic 11px Georgia, serif').attr('fill', '#555')
-        .text(label);
-    });
-  }
+  // Drag to rotate
+  let dragging = false, lx = 0, ly = 0;
+  canvas.addEventListener('mousedown', e => {
+    dragging = true; lx = e.clientX; ly = e.clientY;
+    canvas.style.cursor = 'grabbing';
+  });
+  window.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    pivot.rotation.y += (e.clientX - lx) * 0.01;
+    pivot.rotation.x = Math.max(-1.2, Math.min(0.3, pivot.rotation.x + (e.clientY - ly) * 0.01));
+    lx = e.clientX; ly = e.clientY;
+    render();
+  });
+  window.addEventListener('mouseup', () => { dragging = false; canvas.style.cursor = 'grab'; });
 
-  function renderMarker(w, b) {
-    const mse   = Math.min(computeMSE(w, b), MSE_CAP);
-    const dotPt   = projectPoint(scaleW(w), scaleZ(mse), scaleB(b));
-    const floorPt = projectPoint(scaleW(w), 0,            scaleB(b));
-    dropLine
-      .attr('x1', dotPt.projected.x).attr('y1', dotPt.projected.y)
-      .attr('x2', floorPt.projected.x).attr('y2', floorPt.projected.y);
-    markerDot
-      .attr('cx', dotPt.projected.x).attr('cy', dotPt.projected.y);
-  }
-
-  renderSurface();
-  renderAxes();
-  renderMarker(curW, curB);
-
-  svg.style('cursor', 'grab')
-    .call(d3.drag()
-      .on('start', () => svg.style('cursor', 'grabbing'))
-      .on('drag', event => {
-        alpha += event.dx * 0.01;
-        beta = Math.max(-1.2, Math.min(0.2, beta - event.dy * 0.01));
-        renderSurface();
-        renderAxes();
-        renderMarker(curW, curB);
-      })
-      .on('end', () => svg.style('cursor', 'grab'))
-    );
-
-  return { update(w, b) { curW = w; curB = b; renderMarker(w, b); } };
+  return { update(w, b) { updateMarker(w, b); } };
 }
 
 // ── Setup canvases ────────────────────────────────────────────────────────────
